@@ -370,7 +370,7 @@ pipeline {
     environment {
         DOCKER_IMAGE = "sony9014/mydeploy"                                 # the image pushed to docker registry 
         CONTAINER_NAME = "app"
-        DEV_SERVER = "3.136.27.120"
+        DEV_SERVER = "Public-IP"
     }
 
     stages {
@@ -390,7 +390,7 @@ pipeline {
             steps {
                 script {
 
-                    sshagent(credentials: ['docker-server-ssh']) {
+                    sshagent(credentials: ['docker-server-ssh']) {                 # this is the dev-server PEM file configured in jenkins(credentials)
 
                         sh """
                         ssh -o StrictHostKeyChecking=no ec2-user@${DEV_SERVER} "
@@ -426,3 +426,23 @@ pipeline {
         }
     }
 }
+** Why Rebuild Happens Here (Dev branch)
+1. To check integration compatability 
+   feature A work alone 
+   feature B work alone 
+   integration compatability means nothing but checking whether feature A+B are working together are not 
+2. To check the Dependencies conflicts 
+3. To make sure stable Dev environment (code)
+************************************************************************************************************************************
+RELEASE BRANCH:
+     A release branch is a temporary branch created from the develop branch,A release branch is used to stabilize, test, and finalize code 
+before merging into production (main).
+Main Purpose:
+Final testing (QA, UAT)
+Bug fixing (only critical fixes)
+Versioning
+Preparing production-ready code 
+
+
+
+
