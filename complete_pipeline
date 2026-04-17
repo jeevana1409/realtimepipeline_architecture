@@ -655,5 +655,296 @@ Checkout → Build → Unit Tests → Static Code Analysis → Package → PR �
 once fix branch is merged to release branch, then Release Branch Pipeline Runs Again
 **************************************************************************************************************
 once deployment to QA is done, manually (upstream job) will trigger the deployment of release branch into PRE-PROD server is done. 
-In pre-prod server it is the place where integration testing is done (integration with other modules of the organisation)
+In pre-prod server it is the place where integration testing is done (integration with other modules of the organisation).
+HERE IS THE PIPELINE CODE FOR DEPLOYMENT REPO-PREPROD BRANCH:
 
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'APP_VERSION', defaultValue: '', description: 'Docker image version to deploy')
+    }
+
+    environment {
+        DOCKER_IMAGE   = "sony9014/mydeploy"
+        CONTAINER_NAME = "app-preprod"
+        PREPROD_SERVER = "PREPRODSERVERPUBLICIP"
+    }
+
+    stages {
+
+        stage('Determine Version') {
+            steps {
+                script {
+                    if (!params.APP_VERSION?.trim()) {
+                        error "APP_VERSION not received from upstream!"
+                    }
+
+                    env.APP_VERSION = params.APP_VERSION
+                    echo "Using APP_VERSION from upstream: ${env.APP_VERSION}"
+                }
+            }
+        }
+
+        stage('Deploy to PreProd Server') {
+            steps {
+                script {
+                    sshagent(credentials: ['docker-server-ssh']) {
+                        sh """
+                        ssh -o StrictHostKeyChecking=no ec2-user@${PREPROD_SERVER} '
+                        set -e
+
+                        echo "Pulling Docker image ${DOCKER_IMAGE}:${APP_VERSION} ..."
+                        docker pull ${DOCKER_IMAGE}:${APP_VERSION}
+
+                        echo "Stopping old container..."
+                        docker stop ${CONTAINER_NAME} || true
+
+                        echo "Removing old container..."
+                        docker rm ${CONTAINER_NAME} || true
+
+                        echo "Starting new container..."
+                        docker run -d -p 8082:8080 --name ${CONTAINER_NAME} ${DOCKER_IMAGE}:${APP_VERSION}
+
+                        echo "Checking if container started..."
+                        docker ps | grep ${CONTAINER_NAME} || { echo "Container failed to start!"; exit 1; }
+
+                        echo "PreProd Deployment completed successfully"
+                        '
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ PreProd Deployment Successful"
+        }
+        failure {
+            echo "❌ PreProd Deployment Failed"
+        }
+    }
+}
+
+HOTFIX BRANCH:
+If there are any urgent fixes from production we create hotfix branch from main. 
+You create a hotfix branch from the main/production branch (often called main or master)
+Make the necessary fix
+Test it quickly
+Merge it back into:
+the production branch (to deploy immediately)
+and usually the development branch (so the fix isn’t lost in future releases).
+HERE IS THE PIPELINE FOR HOTFIX BRANCH:
+pipeline {
+    agent any
+
+    tools {
+        maven 'maven'
+    }
+
+    parameters {
+        string(name: 'APP_VERSION', description: 'Hotfix version (example: v1.0.2)')
+    }
+
+    environment {
+        DOCKER_IMAGE = "sony9014/mydeploy"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Validate Version') {
+            steps {
+                script {
+                    if (!params.APP_VERSION) {
+                        error "APP_VERSION is required!"
+                    }
+                    env.APP_VERSION = params.APP_VERSION
+                    echo "Using Hotfix Version: ${env.APP_VERSION}"
+                }
+            }
+        }
+
+        stage('Update Maven Version') {
+            steps {
+                sh "mvn versions:set -DnewVersion=${APP_VERSION}"
+            }
+        }
+
+        stage('Build WAR') {
+            steps {
+                sh "mvn clean package -DskipTests"
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                sh "mvn test"
+            }
+        }
+
+        stage('Security Scan') {
+            steps {
+                sh "trivy fs --severity HIGH,CRITICAL --exit-code 1 ."
+            }
+        }
+        stage('Debug Files') {
+    steps {
+        sh '''
+        echo "==== CURRENT DIRECTORY ===="
+        pwd
+
+        echo "==== LIST ROOT FILES ===="
+        ls -l
+
+        echo "==== CHECK WAR FILE ===="
+        ls -l webapp/target || true
+
+        echo "==== CHECK .dockerignore ===="
+        cat .dockerignore || true
+        '''
+    }
+}
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )]) {
+
+                        sh """
+                            echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+
+                            docker build -t ${DOCKER_IMAGE}:${APP_VERSION} .
+
+                            docker push ${DOCKER_IMAGE}:${APP_VERSION}
+
+                            docker logout
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Trigger Deployment Repo - PreProd') {
+            steps {
+                script {
+                    build job: 'deployment-repo/preprod',
+                    parameters: [
+                        string(name: 'APP_VERSION', value: "${APP_VERSION}")
+                    ]
+                }
+            }
+        }
+
+        stage('Manual Approval for Production') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    input(
+                        message: 'Deploy Hotfix to Production?',
+                        ok: 'Deploy',
+                        submitter: 'sony'
+                    )
+                }
+            }
+        }
+
+        stage('Trigger Deployment Repo - Prod') {
+            steps {
+                script {
+                    build job: 'deployment-repo/prod',
+                    parameters: [
+                        string(name: 'APP_VERSION', value: "${APP_VERSION}")
+                    ]
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Hotfix deployed to Production successfully!"
+        }
+        failure {
+            echo "❌ Hotfix pipeline failed"
+        }
+    }
+}
+
+HERE IS THE PIPELINE FOR PROD BRANCH-DEPLOYMENT REPO:
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'APP_VERSION', defaultValue: '', description: 'Docker image version')
+    }
+
+    environment {
+        DOCKER_IMAGE   = "sony9014/mydeploy"
+        CONTAINER_NAME = "app-prod"
+        PROD_SERVER    = "3.147.238.46"
+    }
+
+    stages {
+
+        stage('Set Version') {
+            steps {
+                script {
+                    if (!params.APP_VERSION?.trim()) {
+                        error "APP_VERSION not received!"
+                    }
+
+                    env.APP_VERSION = params.APP_VERSION
+                    echo "Deploying Version: ${env.APP_VERSION}"
+                }
+            }
+        }
+
+        stage('Deploy to PROD') {
+            steps {
+                script {
+                    sshagent(credentials: ['docker-server-ssh']) {
+                        sh """
+                        ssh -o StrictHostKeyChecking=no ec2-user@${PROD_SERVER} '
+                        set -e
+
+                        echo "Pulling image..."
+                        docker pull ${DOCKER_IMAGE}:${APP_VERSION}
+
+                        echo "Stopping old container..."
+                        docker stop ${CONTAINER_NAME} || true
+
+                        echo "Removing old container..."
+                        docker rm ${CONTAINER_NAME} || true
+
+                        echo "Starting new container..."
+                        docker run -d -p 8083:8080 --name ${CONTAINER_NAME} ${DOCKER_IMAGE}:${APP_VERSION}
+
+                        echo "Verifying container..."
+                        docker ps | grep ${CONTAINER_NAME} || { echo "Container failed!"; exit 1; }
+                        '
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ PROD Deployment Successful"
+        }
+        failure {
+            echo "❌ PROD Deployment Failed"
+        }
+    }
+}
