@@ -467,17 +467,50 @@ pipeline {
             }
         }
 
-        stage('Use Version from Dev') {                      ####################################
+       stage('Auto Version Increment') {
             steps {
                 script {
-                    if (!params.APP_VERSION) {
-                        error "APP_VERSION is required!"
-                    }
-                    env.APP_VERSION = params.APP_VERSION
-                    echo "Using Version: ${env.APP_VERSION}"
+                    def version = sh(
+                        script: "git describe --tags \$(git rev-list --tags --max-count=1)",
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Latest Tag: ${version}"
+
+                    def newVersion = version.replace("v", "").tokenize('.')
+                    def major = newVersion[0]
+                    def minor = newVersion[1]
+                    def patch = newVersion[2].toInteger() + 1
+
+                    env.APP_VERSION = "v${major}.${minor}.${patch}"
+
+                    echo "Final Version: ${env.APP_VERSION}"
                 }
             }
         }
+
+        stage('Tag & Push Version') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'github-cred',              
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_PASSWORD'
+                    )]) {
+
+                        sh """
+                            git config user.name jenkins
+                            git config user.email jenkins@local
+
+                            # Prevent failure if tag already exists
+                            git tag ${APP_VERSION} || echo "Tag already exists"
+
+                            git push https://\$GIT_USERNAME:\$GIT_PASSWORD@github.com/sonyvinny77/application-repo.git ${APP_VERSION} || echo "Tag already pushed"
+                        """
+                    }
+                }
+            }
+        } 
 
         stage('Update Maven Version') {
             steps {
@@ -948,3 +981,122 @@ pipeline {
         }
     }
 }
+
+******************************************************************************************
+IN JENKINS DASHBOARD 
+create 2 separate multibranch pipeline jobs for Application-repo job, Deployment-repo job 
+** CONFIGURATION OF CREDENTIALS IN JENKINS SERVER
+ With the help of these credentials jenkins server communicate with those respective servers
+
+1. Manage jenkins > system > add sonarqube > name: sonar-server >
+   URL: http://sonar-serverprivate ip:9000 > save
+   credentials > add secret text > copy paste the sonar-token > 
+   ID : sonar-token (should match the token-name > save
+2. Manage jenkins > credentials > global > add credentials > kind: username with password, 
+   > username: sonyvinny77 > passord: copy paste git-hub token > Id: github-cred > save 
+   (This is used for git cloning)
+3. Manage jenkins > credentials > global > add credentials > kind: secret text
+   (copy paste github token) Id: github-api-creds (this is used for Pull Request)
+4. Manage jenkins > credentials > global > add credentials > kind: username with password,
+   > username: admin(eg) > passord: nexus123 > Id: nexus-cred > save 
+5. Manage jenkins > credentials > global > add credentials > kind: SSH with private key 
+   copy paste the pem keys of dev,qa,pre-prod,prod servers with the help of pem file application 
+   is deployed in respective servers (try to have same pem file for every server)
+
+*********************************************************************************************
+CONFIGURING PATH OF THE TOOLS IN JENKINS-SERVER
+
+ Manage jenkins > global tool configuration > 
+                 add sonarqube-scanner > name: sonar-scanner > path: paste the path of sonar-scanner > save
+                 add JDK > name: JDK-21, path: /usr/lib/jvm/java-21-amazon_corretto.x86_84 > save
+                 add maven > name: maven > path: /opt/maven > save 
+                 add git > name: git > path: /opt/git > save
+************************************************************************************************
+PRE-REQUISTIES:
+1. Launch an EC2 instance name it as Jenkins-Server - Where java,git,maven jenkins should be installed.
+* Jenkins-plugins: Sonarqube-scanner, Git-hub integration plugin, Git-hub branch source plugin SHOULD BE INSTALLED FROM MANAGE JENKINS.
+STEPS FOR INSTALLING TRIVY IN JENKINS SERVER:
+1.Add Trivy Repository---Run below commands in jenkins server:
+sudo tee /etc/yum.repos.d/trivy.repo <<EOF
+[trivy]
+name=Trivy repository
+baseurl=https://aquasecurity.github.io/trivy-repo/rpm/releases/\$basearch/
+gpgcheck=0
+enabled=1
+EOF
+2.Install Trivy:
+sudo yum install trivy -y
+3. Verify Installation:
+trivy --version
+4. Test Trivy Scan:
+trivy image sony9014/myapp:v1.0.7
+This command will show us the vulnerabilities like (HIGH,MEDIUM,CRITICAL,LOW)
+5. I have added trivy scan stage in jenkinsfile so that it will scan the image 
+###################################################################
+2.Launch another instance name it as Sonar-Server - Where Docker should be installed
+We ran sonarqube by creating a docker container: 
+Commands to install docker:
+sudo yum install docker -y
+sudo systemctl enable docker
+sudo systemctl start docker
+sudo usermod -aG docker ec2-user
+newgrp docker
+docker ps
+>> docker run -d --name sonarqube -p 9000:9000 sonarqube-community             #DEFAULT PORT OF SONARQUBE:9000
+By giving the public ip of sonar server we can access it through browser
+>> http://<sonar-public-ip>:9000
+Credentials by default it will be username:admin password:admin later change the default password
+**IN SONAR-SERVER (browser) **
+1. CREATE A PROJECT:
+   projects >> create project >> project name: myproject >> projectkey: myproject-key >> save
+2. GENERATE-TOKEN:
+   go to my account >> security >> Token-name: sonar-token >> token type- usertoken >> generate 
+3. CREATING WEBHOOK 
+  administartion >> configuration >> webhook >> click on create >> name: sonar-hook >> 
+  URL: http://jenkinspublicIP:8080/sonarqube-webhook/ >> save 
+##################################################################################
+3.STEPS FOR INSTALLING NEXUS:
+CREATE AN EC2 INSTANCE FOR NEXUS WITH SSH PORT 22 AND TCP PORT 8081 FOR ACCESSING THROUGH BROWSER
+ON NEXUS SERVER COMMANDS:
+We ran nexus by creating a docker container: 
+Commands to install docker:
+sudo yum install docker -y
+sudo systemctl enable docker
+sudo systemctl start docker
+sudo usermod -aG docker ec2-user
+newgrp docker
+docker ps
+>> docker run -d --name nexus -p 8081:8081 sonatype/nexus3            #DEFAULT PORT OF nexus:8081
+By giving the public ip of nexus server we can access it through browser
+>> http://<nexus-public-ip>:8081
+Default username: admin, passwd: docker exec -it nexus cat /nexus-data/admin.password (to get the password 
+run this command in the nexus-server)
+** CREATE MAVEN REPOSITORY : 
+Settings → Repositories → Create repository
+Create:
+maven2 (hosted)
+Name : my-maven-releases
+Version policy : Release
+Deployment policy : Allow redeploy 
+CLICK ON CREATE REPOSITORY YOU WILL GET A REPOSITORY URL http://<nexus_private_ip>:8081/repository/my-maven-releases/
+In nexus server CONFIGURE MAVEN settings.xml
+GO TO MAVEN DICRECTORY cd ~/.m2
+vi settings.xml
+<settings>
+ <servers>
+   <server>
+     <id>nexus</id>                          # SHOULD MATCH WITH POM.XML ID FROM DISTRIBUTION MANAGEMENT SECTION
+     <username>admin</username>
+     <password>YOUR_NEXUS_PASSWORD</password>            # NEXUS LOGIN PASSWORD WE SHOULD MENTION.MY PASSWORD IS Nexus@123
+   </server>
+ </servers>
+</settings>  
+8. UPDATE pom.xml [ROOT POM.XML WHICH IS INSIDE OF application-repo/pom.xml NOT INSIDE OF SERVER FOLDER OR NOT INSIDE OF WEBAPP FOLDER             
+                   THEY ARE PARENT POM.XML]
+<distributionManagement>
+    <repository>
+        <id>nexus</id>                                                     # SHOULD MATCH WITH SETTINGS.XML ID
+        <name>Nexus</name>                                                       # REPO NAME
+        <url>http://<NEXUS_Public_IP>:8081/repository/my-maven-releases/</url>   # REPO URL 
+    </repository>
+</distributionManagement>
