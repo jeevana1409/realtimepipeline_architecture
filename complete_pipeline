@@ -985,6 +985,13 @@ pipeline {
 ******************************************************************************************
 IN JENKINS DASHBOARD 
 create 2 separate multibranch pipeline jobs for Application-repo job, Deployment-repo job 
+Inside the application job configure branch source with github add github credentials and repo url so that it will pull all branches from that repo 
+and creates seperate job for each branch.
+After every commit instead of doing scan repo from jenkins job we can configure webhook in github this will automatically trigger the job.
+Configuring webhook in github:
+Application-Repo-->Webhook-->Add Webhook-->Payload URL: http://<jenkinsprivateip:8080/github-webhook/-->Content type:application/json-->
+Events: Select just the push event.
+
 ** CONFIGURATION OF CREDENTIALS IN JENKINS SERVER
  With the help of these credentials jenkins server communicate with those respective servers
 
